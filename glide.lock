@@ -1,0 +1,13 @@
+hash: 7b081fad7b0a4e8c6ba1f7106fed74417ea39f7d9ca5300e5205f8c7089617da
+updated: 2016-11-01T14:03:45.050557964+01:00
+imports:
+- name: github.com/iovisor/iomodules
+  version: 4880c9ca79cb6f87977f39578c0f33732bed74d9
+  subpackages:
+  - hover/api
+  - hover/bpf
+  - hover/util
+  - tree/master/hover/bpf
+- name: github.com/willf/bitset
+  version: 24b253213c7bdcdd6cde7d6c73760eb16d98551c
+testImports: []

@@ -1,0 +1,5 @@
+package: github.com/alban/golang-ebpf
+import:
+- package: github.com/iovisor/iomodules
+  subpackages:
+  - tree/master/hover/bpf
