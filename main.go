@@ -16,7 +16,6 @@ import (
 #include <bcc/libbpf.h>
 #include <bcc/perf_reader.h>
 #include <stdio.h>
-int bpf_open_perf_event(uint32_t type, uint64_t config, int pid, int cpu);
 void *bpf_open_perf_buffer(perf_reader_raw_cb raw_cb, void *cb_cookie, int pid, int cpu);
 
 struct tcp_event_t {
@@ -72,12 +71,54 @@ int kprobe__tcp_v4_connect(struct pt_regs *ctx, struct sock *sk)
 };
 `
 
-func initPerfMap(table *bpf.BpfTable) unsafe.Pointer {
-	reader := C.bpf_open_perf_buffer((*[0]byte)(C.raw_cb), nil, -1, 0)
-	if reader != nil {
-		fmt.Printf("reader address: %v\n", reader)
+func initPerfMap(table *bpf.BpfTable) []*C.struct_perf_reader {
+	fd := table.Config()["fd"].(int)
+	key_size := table.Config()["key_size"].(uint64)
+	leaf_size := table.Config()["leaf_size"].(uint64)
+	key := make([]byte, key_size)
+	leaf := make([]byte, leaf_size)
+	keyP := unsafe.Pointer(&key[0])
+	leafP := unsafe.Pointer(&leaf[0])
+
+	readers := []*C.struct_perf_reader{}
+
+	cpu := 0
+	res := 0
+	for res == 0 {
+		// Get a new perf fd
+		// https://github.com/torvalds/linux/blob/v4.8/include/uapi/linux/perf_event.h
+		// Type: PERF_TYPE_SOFTWARE = 1
+		// config: PERF_COUNT_SW_BPF_OUTPUT = 10
+		const PERF_TYPE_SOFTWARE uint32 = 1
+		const PERF_COUNT_SW_BPF_OUTPUT uint64 = 10
+
+		reader := C.bpf_open_perf_buffer((*[0]byte)(C.raw_cb), nil, -1, C.int(cpu))
+		if reader == nil {
+			fmt.Printf("failed to get reader\n")
+			os.Exit(1)
+		}
+
+		perfFd := C.perf_reader_fd(reader)
+
+		readers = append(readers, (*C.struct_perf_reader)(reader))
+
+		fmt.Printf("perfFd=%v\n", perfFd)
+
+		leaf[0] = byte(perfFd) // TODO: how does Go work again?
+		leaf[1] = 0
+		leaf[2] = 0
+		leaf[3] = 0
+		r, err := C.bpf_update_elem(C.int(fd), keyP, leafP, 0)
+		if r != 0 {
+			fmt.Printf("unable to initialize perf map: %s", err)
+			os.Exit(1)
+		}
+
+		res = int(C.bpf_get_next_key(C.int(fd), keyP, keyP))
+		cpu++
 	}
-	return reader
+	return readers
+
 }
 
 func main() {
@@ -99,16 +140,13 @@ func main() {
 
 	t := bpf.NewBpfTable(0, m)
 	fmt.Printf("table: %q %q\n%v\n", t.ID(), t.Name(), t.Config())
-	reader := initPerfMap(t)
+	readers := initPerfMap(t)
 
 	fmt.Printf("Ready.\n")
 
 	i := 0
 	for {
-		var pr *C.struct_perf_reader = (*C.struct_perf_reader)(reader)
-		var readers []*C.struct_perf_reader
-		readers = []*C.struct_perf_reader{pr}
-		C.perf_reader_poll(1, &readers[0], 2000)
+		C.perf_reader_poll(4, &readers[0], 2000)
 		fmt.Printf("Iteration: %d\n", i)
 		i++
 	}

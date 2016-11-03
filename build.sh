@@ -1,3 +1,3 @@
 #!/bin/bash
-sudo docker build -t albanc/toolbox-bcc .
+sudo docker build --no-cache -t albanc/toolbox-bcc .
 
