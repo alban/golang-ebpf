@@ -25,13 +25,32 @@ struct tcp_event_t {
 
 void callback(int cpu, void *data, int size) {
 	struct tcp_event_t *ev = (struct tcp_event_t *)data;
-	printf("Hello bpf, my pid is %lld\n", ev->pid);
+	uint32_t pid, tid;
+
+	if (size != sizeof(*ev)) {
+		printf("Invalid tcp_event_t event\n");
+		return;
+	}
+
+	pid = ev->pid & 0xffffffff;
+	tid = (ev->pid >>32) & 0xffffffff;
+
+	printf("Hello bpf, my pid is %d and tid is %d\n", pid, tid);
 }
 
 void raw_cb(void *cb_cookie, void *raw, int raw_size) {
-	printf("im the raw\n");
-	// hardcode cpu 0
-	callback(0, raw, raw_size);
+	// See src/cc/perf_reader.c:parse_sw()
+	// struct {
+	//     uint32_t size;
+	//     char data[0];
+	// };
+
+	if (raw_size != sizeof(uint32_t) + sizeof(struct tcp_event_t)) {
+		printf("Invalid perf event: raw_size=%d != %lu + %lu\n", raw_size, sizeof(uint32_t), sizeof(struct tcp_event_t));
+		return;
+	}
+
+	callback(0, raw, raw_size - sizeof(uint32_t));
 }
 */
 import "C"
@@ -144,11 +163,8 @@ func main() {
 
 	fmt.Printf("Ready.\n")
 
-	i := 0
 	for {
-		C.perf_reader_poll(4, &readers[0], 2000)
-		fmt.Printf("Iteration: %d\n", i)
-		i++
+		C.perf_reader_poll(4, &readers[0], -1)
 	}
 
 	time.Sleep(time.Second * 1000)
