@@ -44,11 +44,39 @@ const source string = `
 #include <net/sock.h>
 #include <net/inet_sock.h>
 #include <net/net_namespace.h>
-#include <bcc/proto.h>
 
 #define TCP_EVENT_TYPE_CONNECT 1
 #define TCP_EVENT_TYPE_ACCEPT  2
 #define TCP_EVENT_TYPE_CLOSE   3
+
+#define TASK_COMM_LEN 16 // linux/sched.h
+
+#define SIZE_STRUCT_SOCK 728
+#define SIZE_STRUCT_INET_SOCK 904
+#define SIZE_POSSIBLE_NET_T 8
+
+#define OFFSET_STRUCT_INET_SOCK_INET_SPORT 744
+#define OFFSET_STRUCT_SOCK_SKC_RCV_SADDR 4
+#define OFFSET_STRUCT_SOCK_SKC_DADDR 0
+#define OFFSET_STRUCT_SOCK_SKC_DPORT 12
+#define OFFSET_STRUCT_SOCK_SKC_NET 48
+#define OFFSET_STRUCT_SOCK_SK_PROTOCOL 329
+
+#define SIZE_STRUCT_NS_COMMON 42
+#define OFFSET_POSSIBLE_NET_T_NET 0
+
+struct stub_sock {
+	char data[SIZE_STRUCT_INET_SOCK];
+};
+struct stub_possible_net_t {
+	char data[SIZE_POSSIBLE_NET_T];
+};
+//struct stub_net {
+//	char data[SIZE_STRUCT_NET];
+//};
+//struct stub_ns_common {
+//	char data[SIZE_STRUCT_NS_COMMON];
+//};
 
 struct tcp_event_t {
 	char ev_type[12];
@@ -62,12 +90,36 @@ struct tcp_event_t {
 };
 
 BPF_PERF_OUTPUT(tcp_event);
-BPF_HASH(connectsock, u64, struct sock *);
-BPF_HASH(closesock, u64, struct sock *);
+BPF_HASH(connectsock, u64, struct stub_sock *);
+BPF_HASH(closesock, u64, struct stub_sock *);
 
-int kprobe__tcp_v4_connect(struct pt_regs *ctx, struct sock *sk)
+void print_definitions()
+{
+#if 1
+	bpf_trace_printk("#define SIZE_STRUCT_SOCK %d\n", sizeof(struct sock));
+	bpf_trace_printk("#define SIZE_STRUCT_INET_SOCK %d\n", sizeof(struct inet_sock));
+	bpf_trace_printk("#define SIZE_POSSIBLE_NET_T %d\n", sizeof(possible_net_t));
+	bpf_trace_printk("#define SIZE_STRUCT_NET %d\n", sizeof(struct net));
+	bpf_trace_printk("#define SIZE_STRUCT_NS_COMMON %d\n", sizeof(struct ns_common));
+
+	bpf_trace_printk("#define OFFSET_STRUCT_INET_SOCK_INET_SPORT %d\n", &((struct inet_sock *)NULL)->inet_sport);
+	bpf_trace_printk("#define OFFSET_STRUCT_SOCK_SKC_RCV_SADDR %d\n", &((struct sock *)NULL)->__sk_common.skc_rcv_saddr);
+	bpf_trace_printk("#define OFFSET_STRUCT_SOCK_SKC_DADDR %d\n", &((struct sock *)NULL)->__sk_common.skc_daddr);
+	bpf_trace_printk("#define OFFSET_STRUCT_SOCK_SKC_DPORT %d\n", &((struct sock *)NULL)->__sk_common.skc_dport);
+	bpf_trace_printk("#define OFFSET_STRUCT_SOCK_SKC_NET %d\n", &((struct sock *)NULL)->__sk_common.skc_net);
+	bpf_trace_printk("#define OFFSET_STRUCT_SOCK_SK_PROTOCOL %d\n", (void *)(&((struct sock *)NULL)->sk_wmem_queued) - 3);
+
+	bpf_trace_printk("#define OFFSET_POSSIBLE_NET_T_NET %d\n", (void *)(&((possible_net_t *)NULL)->net));
+	bpf_trace_printk("#define OFFSET_STRUCT_NET_NS %d\n", (void *)(&((struct net *)NULL)->ns));
+	bpf_trace_printk("#define OFFSET_STRUCT_NS_COMMON_INUM %d\n", (void *)(&((struct ns_common *)NULL)->inum));
+#endif
+}
+
+int kprobe__tcp_v4_connect(struct pt_regs *ctx, struct stub_sock *sk)
 {
 	u64 pid = bpf_get_current_pid_tgid();
+
+	print_definitions();
 
 	// stash the sock ptr for lookup on return
 	connectsock.update(&pid, &sk);
@@ -80,7 +132,7 @@ int kretprobe__tcp_v4_connect(struct pt_regs *ctx)
 	int ret = PT_REGS_RC(ctx);
 	u64 pid = bpf_get_current_pid_tgid();
 
-	struct sock **skpp;
+	struct stub_sock **skpp;
 	skpp = connectsock.lookup(&pid);
 	if (skpp == 0) {
 		return 0;	// missed entry
@@ -93,25 +145,21 @@ int kretprobe__tcp_v4_connect(struct pt_regs *ctx)
 		return 0;
 	}
 
-
 	// pull in details
 	struct sock *skp = *skpp;
 	struct ns_common *ns;
 	u32 saddr = 0, daddr = 0, net_ns_inum = 0;
 	u16 sport = 0, dport = 0;
-	bpf_probe_read(&sport, sizeof(sport), &((struct inet_sock *)skp)->inet_sport);
-	bpf_probe_read(&saddr, sizeof(saddr), &skp->__sk_common.skc_rcv_saddr);
-	bpf_probe_read(&daddr, sizeof(daddr), &skp->__sk_common.skc_daddr);
-	bpf_probe_read(&dport, sizeof(dport), &skp->__sk_common.skc_dport);
+	bpf_probe_read(&sport, sizeof(sport), &((struct stub_sock *)skp)->data[OFFSET_STRUCT_INET_SOCK_INET_SPORT]);
+	bpf_probe_read(&saddr, sizeof(saddr), &((struct stub_sock *)skp)->data[OFFSET_STRUCT_SOCK_SKC_RCV_SADDR]);
+	bpf_probe_read(&daddr, sizeof(daddr), &((struct stub_sock *)skp)->data[OFFSET_STRUCT_SOCK_SKC_DADDR]);
+	bpf_probe_read(&dport, sizeof(dport), &((struct stub_sock *)skp)->data[OFFSET_STRUCT_SOCK_SKC_DPORT]);
 
-// Get network namespace id, if kernel supports it
-#ifdef CONFIG_NET_NS
 	possible_net_t skc_net;
+	//bpf_probe_read(&skc_net, sizeof(skc_net), &((struct stub_sock *)skp)->data[OFFSET_STRUCT_SOCK_SKC_NET]);
 	bpf_probe_read(&skc_net, sizeof(skc_net), &skp->__sk_common.skc_net);
+	//bpf_probe_read(&net_ns_inum, sizeof(net_ns_inum), ((struct stub_ns_common *)(&skc_net.data[OFFSET_POSSIBLE_NET_T_NET + OFFSET_STRUCT_NET_NS]))->data[OFFSET_STRUCT_NS_COMMON_INUM]);
 	bpf_probe_read(&net_ns_inum, sizeof(net_ns_inum), &skc_net.net->ns.inum);
-#else
-	net_ns_inum = 0;
-#endif
 
 	// output
 	struct tcp_event_t evt = {
@@ -136,7 +184,7 @@ int kretprobe__tcp_v4_connect(struct pt_regs *ctx)
 	return 0;
 }
 
-int kprobe__tcp_close(struct pt_regs *ctx, struct sock *sk)
+int kprobe__tcp_close(struct pt_regs *ctx, struct stub_sock *sk)
 {
 	u64 pid = bpf_get_current_pid_tgid();
 
@@ -150,29 +198,25 @@ int kretprobe__tcp_close(struct pt_regs *ctx)
 {
 	u64 pid = bpf_get_current_pid_tgid();
 
-	struct sock **skpp;
+	struct stub_sock **skpp;
 	skpp = closesock.lookup(&pid);
 	if (skpp == 0) {
 		return 0;	// missed entry
 	}
 
 	// pull in details
-	struct sock *skp = *skpp;
+	struct stub_sock *skp = *skpp;
 	u32 saddr = 0, daddr = 0, net_ns_inum = 0;
 	u16 sport = 0, dport = 0;
-	bpf_probe_read(&saddr, sizeof(saddr), &skp->__sk_common.skc_rcv_saddr);
-	bpf_probe_read(&daddr, sizeof(daddr), &skp->__sk_common.skc_daddr);
-	bpf_probe_read(&sport, sizeof(sport), &((struct inet_sock *)skp)->inet_sport);
-	bpf_probe_read(&dport, sizeof(dport), &skp->__sk_common.skc_dport);
 
-// Get network namespace id, if kernel supports it
-#ifdef CONFIG_NET_NS
+	bpf_probe_read(&sport, sizeof(sport), &((struct stub_sock *)skp)->data[OFFSET_STRUCT_INET_SOCK_INET_SPORT]);
+	bpf_probe_read(&saddr, sizeof(saddr), &((struct stub_sock *)skp)->data[OFFSET_STRUCT_SOCK_SKC_RCV_SADDR]);
+	bpf_probe_read(&daddr, sizeof(daddr), &((struct stub_sock *)skp)->data[OFFSET_STRUCT_SOCK_SKC_DADDR]);
+	bpf_probe_read(&dport, sizeof(dport), &((struct stub_sock *)skp)->data[OFFSET_STRUCT_SOCK_SKC_DPORT]);
+
 	possible_net_t skc_net;
-	bpf_probe_read(&skc_net, sizeof(skc_net), &skp->__sk_common.skc_net);
+	bpf_probe_read(&skc_net, sizeof(skc_net), &((struct stub_sock *)skp)->data[OFFSET_STRUCT_SOCK_SKC_NET]);
 	bpf_probe_read(&net_ns_inum, sizeof(net_ns_inum), &skc_net.net->ns.inum);
-#else
-	net_ns_inum = 0;
-#endif
 
 	// output
 	struct tcp_event_t evt = {
@@ -219,14 +263,9 @@ int kretprobe__inet_csk_accept(struct pt_regs *ctx)
 	bpf_probe_read(&lport, sizeof(lport), &newsk->__sk_common.skc_num);
 	bpf_probe_read(&dport, sizeof(dport), &newsk->__sk_common.skc_dport);
 
-// Get network namespace id, if kernel supports it
-#ifdef CONFIG_NET_NS
 	possible_net_t skc_net;
 	bpf_probe_read(&skc_net, sizeof(skc_net), &newsk->__sk_common.skc_net);
 	bpf_probe_read(&net_ns_inum, sizeof(net_ns_inum), &skc_net.net->ns.inum);
-#else
-	net_ns_inum = 0;
-#endif
 
 	if (family == AF_INET) {
 		struct tcp_event_t evt = {.ev_type = "accept", .netns = net_ns_inum};
