@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"time"
 	"unsafe"
 
 	"github.com/iovisor/iomodules/hover/bpf"
@@ -279,21 +278,20 @@ func tcpEventCb(cb_cookie unsafe.Pointer, raw unsafe.Pointer, raw_size C.int) {
 	var tcpEvent C.struct_tcp_event_t
 
 	if int(raw_size) != 4+int(unsafe.Sizeof(tcpEvent)) {
-		fmt.Printf("Invalid perf event: raw_size=%d != %d + %d\n", raw_size, 4, unsafe.Sizeof(tcpEvent))
+		fmt.Printf("invalid perf event: raw_size=%d != %d + %d\n", raw_size, 4, unsafe.Sizeof(tcpEvent))
 		return
 	}
 
 	tcpEventCallback(0, (*C.struct_tcp_event_t)(raw))
 }
 
-func initPerfMap(table *bpf.BpfTable) []*C.struct_perf_reader {
+func initPerfMap(table *bpf.BpfTable) ([]*C.struct_perf_reader, error) {
 	fd := table.Config()["fd"].(int)
 	key_size := table.Config()["key_size"].(uint64)
 	leaf_size := table.Config()["leaf_size"].(uint64)
 
 	if key_size != 4 || leaf_size != 4 {
-		fmt.Printf("Wrong size\n")
-		os.Exit(1)
+		return nil, fmt.Errorf("wrong size")
 	}
 
 	key := make([]byte, key_size)
@@ -308,8 +306,7 @@ func initPerfMap(table *bpf.BpfTable) []*C.struct_perf_reader {
 	for res == 0 {
 		reader := C.bpf_open_perf_buffer((*[0]byte)(C.tcpEventCb), nil, -1, C.int(cpu))
 		if reader == nil {
-			fmt.Printf("failed to get reader\n")
-			os.Exit(1)
+			return nil, fmt.Errorf("failed to get reader")
 		}
 
 		perfFd := C.perf_reader_fd(reader)
@@ -322,92 +319,85 @@ func initPerfMap(table *bpf.BpfTable) []*C.struct_perf_reader {
 		leaf[3] = 0
 		r, err := C.bpf_update_elem(C.int(fd), keyP, leafP, 0)
 		if r != 0 {
-			fmt.Printf("unable to initialize perf map: %s", err)
-			os.Exit(1)
+			return nil, fmt.Errorf("unable to initialize perf map: %v", err)
 		}
 
 		res = int(C.bpf_get_next_key(C.int(fd), keyP, keyP))
 		cpu++
 	}
-	return readers
-
+	return readers, nil
 }
 
-func main() {
-	fmt.Printf("Hello, world.\n")
-
+func trace() error {
 	m := bpf.NewBpfModule(source, []string{})
+	defer m.Close()
 
 	connect_kprobe, err := m.LoadKprobe("kprobe__tcp_v4_connect")
 	if err != nil {
-		fmt.Printf("Failed to LoadKprobe: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to LoadKprobe: %v", err)
 	}
 
 	err = m.AttachKprobe("tcp_v4_connect", connect_kprobe)
 	if err != nil {
-		fmt.Printf("Failed to AttachKprobe: %v\n", err)
-		os.Exit(1)
+		fmt.Errorf("Failed to AttachKprobe: %v", err)
 	}
 
 	connect_kretprobe, err := m.LoadKprobe("kretprobe__tcp_v4_connect")
 	if err != nil {
-		fmt.Printf("Failed to LoadKprobe: %v\n", err)
-		os.Exit(1)
+		fmt.Errorf("Failed to LoadKprobe: %v", err)
 	}
 
 	err = m.AttachKretprobe("tcp_v4_connect", connect_kretprobe)
 	if err != nil {
-		fmt.Printf("Failed to AttachretKprobe: %v\n", err)
-		os.Exit(1)
+		fmt.Errorf("Failed to AttachretKprobe: %v", err)
 	}
 
 	close_kprobe, err := m.LoadKprobe("kprobe__tcp_close")
 	if err != nil {
-		fmt.Printf("Failed to LoadKprobe: %v\n", err)
-		os.Exit(1)
+		fmt.Errorf("Failed to LoadKprobe: %v", err)
 	}
 
 	err = m.AttachKprobe("tcp_close", close_kprobe)
 	if err != nil {
-		fmt.Printf("Failed to AttachKprobe: %v\n", err)
-		os.Exit(1)
+		fmt.Errorf("Failed to AttachKprobe: %v", err)
 	}
 
 	close_kretprobe, err := m.LoadKprobe("kretprobe__tcp_close")
 	if err != nil {
-		fmt.Printf("Failed to LoadKprobe: %v\n", err)
-		os.Exit(1)
+		fmt.Errorf("Failed to LoadKprobe: %v", err)
 	}
 
 	err = m.AttachKretprobe("tcp_close", close_kretprobe)
 	if err != nil {
-		fmt.Printf("Failed to AttachretKprobe: %v\n", err)
-		os.Exit(1)
+		fmt.Errorf("Failed to AttachretKprobe: %v", err)
 	}
 
 	accept_kretprobe, err := m.LoadKprobe("kretprobe__inet_csk_accept")
 	if err != nil {
-		fmt.Printf("Failed to LoadKretprobe: %v\n", err)
-		os.Exit(1)
+		fmt.Errorf("Failed to LoadKretprobe: %v", err)
 	}
 
 	err = m.AttachKretprobe("inet_csk_accept", accept_kretprobe)
 	if err != nil {
-		fmt.Printf("Failed to AttachKprobe: %v\n", err)
-		os.Exit(1)
+		fmt.Errorf("Failed to AttachKprobe: %v", err)
 	}
 
 	t := bpf.NewBpfTable(0, m)
-	readers := initPerfMap(t)
-
-	fmt.Printf("Ready.\n")
+	readers, err := initPerfMap(t)
+	if err != nil {
+		return fmt.Errorf("error initializing perf map: %v", err)
+	}
 
 	for {
 		C.perf_reader_poll(C.int(len(readers)), &readers[0], -1)
 	}
 
-	time.Sleep(time.Second * 1000)
+	return nil
+}
 
-	//m.Close()
+func main() {
+	if err := trace(); err != nil {
+		fmt.Fprintf(os.Stderr, "Trace error: %v\n", err)
+		os.Exit(1)
+	}
 }
