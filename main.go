@@ -259,7 +259,7 @@ func tcpEventCallback(cpu int, tcpEvent *C.struct_tcp_event_t) {
 	binary.LittleEndian.PutUint32(daddrbuf, uint32(tcpEvent.daddr))
 
 	sIP := net.IPv4(saddrbuf[0], saddrbuf[1], saddrbuf[2], saddrbuf[3])
-	dIP := net.IPv4(daddrbuf[0], daddrbuf[2], daddrbuf[2], daddrbuf[3])
+	dIP := net.IPv4(daddrbuf[0], daddrbuf[1], daddrbuf[2], daddrbuf[3])
 
 	sport := tcpEvent.sport
 	dport := tcpEvent.dport
